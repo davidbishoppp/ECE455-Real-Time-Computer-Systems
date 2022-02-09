@@ -1,6 +1,7 @@
 /* Standard includes. */
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "stm32f4_discovery.h"
 /* Kernel includes. */
 #include "stm32f4xx.h"
@@ -11,7 +12,7 @@
 #include "../FreeRTOS_Source/include/timers.h"
 
 // Project 1 includes
-#include "GPIO_setup.h"
+
 
 /*-----------------------------------------------------------*/
 #define mainQUEUE_LENGTH 100
@@ -45,13 +46,13 @@ static void Amber_LED_Controller_Task( void *pvParameters );
 
 xQueueHandle xQueue_handle = 0;
 
-
+void Init_GPIO2();
 /*-----------------------------------------------------------*/
 
 int main(void)
 {
 
-	Init_GPIO();
+	Init_GPIO2();
 	return 0;
 
 	/* Initialize LEDs */
@@ -83,6 +84,26 @@ int main(void)
 	vTaskStartScheduler();
 
 	return 0;
+}
+
+void Init_GPIO2() {
+	// Enable AHB1 Clock
+	RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);
+
+	// Struct to IN GPIOs
+	GPIO_InitTypeDef* GPIO_Struct = malloc(sizeof(GPIO_InitTypeDef*));
+	GPIO_Struct->GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2 | GPIO_Pin_6 | GPIO_Pin_7 |GPIO_Pin_8;
+	GPIO_Struct->GPIO_Mode = GPIO_Mode_IN;
+	GPIO_Struct->GPIO_Speed = GPIO_Speed_100MHz;
+	GPIO_Struct->GPIO_OType = GPIO_OType_OD;
+	GPIO_Struct->GPIO_PuPd = GPIO_PuPd_UP;
+
+	GPIO_Init(GPIOC, GPIO_Struct);
+
+	// Struct to init Analog GPIO
+	//GPIO_InitTypeDef GPIO_Struct;
+	//GPIO_Struct.GPIO_Pin = GPIO_Pin_3;
+	//GPIO_Struct.GPIO_Mode = GPIO_Mode_AN;
 }
 
 
