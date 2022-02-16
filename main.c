@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include "stm32f4_discovery.h"
 /* Kernel includes. */
 #include "stm32f4xx.h"
@@ -16,7 +17,7 @@
 
 
 /*-----------------------------------------------------------*/
-#define mainQUEUE_LENGTH 100
+#define QUEUE_LENGTH 100
 
 #define amber  	0
 #define green  	1
@@ -28,6 +29,22 @@
 #define red_led		LED5
 #define blue_led	LED6
 
+#define Data	GPIO_Pin_6
+#define Clock	GPIO_Pin_7
+#define Reset	GPIO_Pin_8
+
+// Prototypes
+#define Flow_Adjustment_Task_Priority 1
+static void Flow_Adjustment_Task(void *pvParameters);
+
+#define Generator_Task_Priority 1
+static void Generator_Task(void *pvParameters);
+
+#define Light_State_Task_Priority 1
+static void Light_State_Task(void *pvParameters);
+
+#define Display_Task_Priority 1
+static void Display_Task(void *pvParameters);
 
 /*
  * TODO: Implement this function for any hardware specific clock configuration
@@ -39,13 +56,15 @@ static void prvSetupHardware( void );
  * The queue send and receive tasks as described in the comments at the top of
  * this file.
  */
-static void Manager_Task( void *pvParameters );
-static void Blue_LED_Controller_Task( void *pvParameters );
-static void Green_LED_Controller_Task( void *pvParameters );
-static void Red_LED_Controller_Task( void *pvParameters );
-static void Amber_LED_Controller_Task( void *pvParameters );
+void Manager_Task( void *pvParameters );
+void Blue_LED_Controller_Task( void *pvParameters );
+void Green_LED_Controller_Task( void *pvParameters );
+void Red_LED_Controller_Task( void *pvParameters );
+void Amber_LED_Controller_Task( void *pvParameters );
 
-xQueueHandle xQueue_handle = 0;
+xQueueHandle ADC_Queue_Handle = 0;
+xQueueHandle Traffic_Queue_Handle = 0;
+xQueueHandle Light_Queue_Handle = 0;
 
 void GPIO_Setup() {
 	NVIC_SetPriorityGrouping(0);
@@ -55,7 +74,8 @@ void GPIO_Setup() {
 
 	// Struct to IN GPIOs
 	GPIO_InitTypeDef GPIO_Struct;
-	GPIO_Struct.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2;
+	GPIO_Struct.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2; // LED GPIO
+	GPIO_Struct.GPIO_Pin |= GPIO_Pin_6 | GPIO_Pin_7 | GPIO_Pin_8; // Shift Register GPIO
 	GPIO_Struct.GPIO_Mode = GPIO_Mode_OUT;
 	GPIO_Struct.GPIO_Speed = GPIO_Speed_100MHz;
 	GPIO_Struct.GPIO_OType = GPIO_OType_PP;
@@ -65,13 +85,15 @@ void GPIO_Setup() {
 
 	// Struct to init Analog GPIO
 	GPIO_InitTypeDef GPIO_Struct_AN;
-	GPIO_Struct.GPIO_Pin = GPIO_Pin_3;
-	GPIO_Struct.GPIO_Mode = GPIO_Mode_AN;
-	GPIO_Struct.GPIO_Speed = GPIO_Speed_100MHz;
-	GPIO_Struct.GPIO_OType = GPIO_OType_PP;
-	GPIO_Struct.GPIO_PuPd = GPIO_PuPd_NOPULL;
+	GPIO_Struct_AN.GPIO_Pin = GPIO_Pin_3;
+	GPIO_Struct_AN.GPIO_Mode = GPIO_Mode_AN;
+	GPIO_Struct_AN.GPIO_PuPd = GPIO_PuPd_NOPULL;
 
 	GPIO_Init(GPIOC, &GPIO_Struct_AN);
+
+	GPIO_SetBits(GPIOC, Reset);
+	GPIO_SetBits(GPIOC, Clock);
+	GPIO_SetBits(GPIOC, Data);
 }
 
 void ADC_Setup() {
@@ -80,33 +102,20 @@ void ADC_Setup() {
 	ADC_InitTypeDef ADC_Struct;
 	ADC_Struct.ADC_Resolution = ADC_Resolution_12b;
 	ADC_Struct.ADC_ScanConvMode = DISABLE;
-	ADC_Struct.ADC_ContinuousConvMode = ENABLE;
+	ADC_Struct.ADC_ContinuousConvMode = DISABLE;
+	ADC_Struct.ADC_ExternalTrigConv = ADC_ExternalTrigConv_T1_CC1;
 	ADC_Struct.ADC_ExternalTrigConvEdge = ADC_ExternalTrigConvEdge_None;
 	ADC_Struct.ADC_DataAlign = ADC_DataAlign_Right;
-	ADC_Struct.ADC_NbrOfConversion = 1;
 
 	ADC_Init(ADC1, &ADC_Struct);
-
-	ADC_CommonInitTypeDef ADC_Common_Struct;
-	ADC_Common_Struct.ADC_Mode = ADC_Mode_Independent;
-	ADC_Common_Struct.ADC_Prescaler = ADC_Prescaler_Div2;
-	ADC_Common_Struct.ADC_DMAAccessMode = ADC_DMAAccessMode_Disabled;
-	ADC_Common_Struct.ADC_TwoSamplingDelay = ADC_TwoSamplingDelay_5Cycles;
-
-	ADC_CommonInit(&ADC_Common_Struct);
-
-
-
-	ADC_RegularChannelConfig(ADC1, ADC_Channel_13, 1, ADC_SampleTime_480Cycles);
-
-
 	ADC_Cmd(ADC1, ENABLE);
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_13, 1, ADC_SampleTime_84Cycles);
 }
 
-uint16_t Get_ADC() {
+uint16_t Get_ADC_Percent() {
 	ADC_SoftwareStartConv(ADC1);
 	while (!ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC));
-	return ADC_GetConversionValue(ADC1);
+	return (ADC_GetConversionValue(ADC1) * 6) / 4100;
 }
 
 void LED_on() {
@@ -120,46 +129,59 @@ void LED_off() {
 	GPIO_ResetBits(GPIOC, GPIO_Pin_1);
 	GPIO_ResetBits(GPIOC, GPIO_Pin_2);
 }
+
+void move_traffic(bool addCar) {
+	GPIO_ResetBits(GPIOC, Clock);
+	GPIO_ResetBits(GPIOC, Data);
+	if (addCar) {
+		GPIO_SetBits(GPIOC, Data);
+	}
+	GPIO_SetBits(GPIOC, Clock);
+}
+
+void reset_traffic() {
+	GPIO_ResetBits(GPIOC, Reset);
+	GPIO_SetBits(GPIOC, Reset);
+}
+
+void test() {
+	int i = 0;
+	bool addCar = false;
+	while (1) {
+		//LED_on();
+		printf("value: %i\n", Get_ADC_Percent());
+		//LED_off();
+		continue;
+		move_traffic(addCar);
+		addCar = !addCar;
+		i++;
+		if (i >= 12) {
+			reset_traffic();
+			i = 0;
+		}
+	}
+}
 /*-----------------------------------------------------------*/
 
-int main(void)
-{
+int main(void) {
 
 	GPIO_Setup();
 	ADC_Setup();
 
-	while (1) {
-		LED_on();
-		printf("value: %i\n", Get_ADC());
-		LED_off();
-	}
+	// Create Queues for ADC and Traffic values, declared as global variables above.
+	ADC_Queue_Handle = xQueueCreate(QUEUE_LENGTH, sizeof( uint16_t ));
+	Traffic_Queue_Handle = xQueueCreate(QUEUE_LENGTH, sizeof(uint8_t));
+	Light_Queue_Handle = xQueueCreate(QUEUE_LENGTH, sizeof(uint8_t));
 
-	return 0;
+	// Add queues to the registry
+	vQueueAddToRegistry(ADC_Queue_Handle, "ADCQueue");
+	vQueueAddToRegistry(Traffic_Queue_Handle, "TrafficQueue");
+	vQueueAddToRegistry(Light_Queue_Handle, "LightQueue");
 
-	/* Initialize LEDs */
-	STM_EVAL_LEDInit(amber_led);
-	STM_EVAL_LEDInit(green_led);
-	STM_EVAL_LEDInit(red_led);
-	STM_EVAL_LEDInit(blue_led);
-
-	/* Configure the system ready to run the demo.  The clock configuration
-	can be done here if it was not done before main() was called. */
-	prvSetupHardware();
-
-
-	/* Create the queue used by the queue send and queue receive tasks.
-	http://www.freertos.org/a00116.html */
-	xQueue_handle = xQueueCreate( 	mainQUEUE_LENGTH,		/* The number of items the queue can hold. */
-							sizeof( uint16_t ) );	/* The size of each item the queue holds. */
-
-	/* Add to the registry, for the benefit of kernel aware debugging. */
-	vQueueAddToRegistry( xQueue_handle, "MainQueue" );
-
-	xTaskCreate( Manager_Task, "Manager", configMINIMAL_STACK_SIZE, NULL, 2, NULL);
-	xTaskCreate( Blue_LED_Controller_Task, "Blue_LED", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-	xTaskCreate( Red_LED_Controller_Task, "Red_LED", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-	xTaskCreate( Green_LED_Controller_Task, "Green_LED", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
-	xTaskCreate( Amber_LED_Controller_Task, "Amber_LED", configMINIMAL_STACK_SIZE, NULL, 1, NULL);
+	xTaskCreate( Flow_Adjustment_Task, "FlowAdjustment", configMINIMAL_STACK_SIZE, NULL, Flow_Adjustment_Task_Priority, NULL);
+	xTaskCreate( Generator_Task, "Generator", configMINIMAL_STACK_SIZE, NULL, Generator_Task_Priority, NULL);
+	xTaskCreate( Light_State_Task, "LightState", configMINIMAL_STACK_SIZE, NULL, Light_State_Task_Priority, NULL);
+	xTaskCreate( Display_Task, "Display", configMINIMAL_STACK_SIZE, NULL, Display_Task_Priority, NULL);
 
 	/* Start the tasks and timer running. */
 	vTaskStartScheduler();
@@ -167,150 +189,52 @@ int main(void)
 	return 0;
 }
 
-
-/*-----------------------------------------------------------*/
-
-static void Manager_Task( void *pvParameters )
-{
-	uint16_t tx_data = amber;
-
-
-	while(1)
-	{
-
-		if(tx_data == amber)
-			STM_EVAL_LEDOn(amber_led);
-		if(tx_data == green)
-			STM_EVAL_LEDOn(green_led);
-		if(tx_data == red)
-			STM_EVAL_LEDOn(red_led);
-		if(tx_data == blue)
-			STM_EVAL_LEDOn(blue_led);
-
-		if( xQueueSend(xQueue_handle,&tx_data,1000))
-		{
-			printf("Manager: %u ON!\n", tx_data);
-			if(++tx_data == 4)
-				tx_data = 0;
-			vTaskDelay(1000);
-		}
-		else
-		{
-			printf("Manager Failed!\n");
-		}
+static void Flow_Adjustment_Task(void *pvParameters) {
+	printf("Flow Adjustment Task!\n");
+	while(1) {
+		uint16_t pot_value = Get_ADC_Percent();
+		xQueueSend(ADC_Queue_Handle, &pot_value, 1000);
+		vTaskDelay(pdMS_TO_TICKS(1000));
 	}
 }
 
-/*-----------------------------------------------------------*/
-
-static void Blue_LED_Controller_Task( void *pvParameters )
-{
-	uint16_t rx_data;
-	while(1)
-	{
-		if(xQueueReceive(xQueue_handle, &rx_data, 500))
-		{
-			if(rx_data == blue)
-			{
-				vTaskDelay(250);
-				STM_EVAL_LEDOff(blue_led);
-				printf("Blue Off.\n");
+static void Generator_Task(void *pvParameters) {
+	int calls = 0;
+	while(1) {
+		printf("Generator Task!\n");
+		// Get ADC percentage
+		uint16_t pot_value;
+		if (xQueueReceive(ADC_Queue_Handle, &pot_value, 500)) {
+			// TODO make actual probablity
+			if (calls >= pot_value) {
+				calls = 0;
+				uint8_t set = 1;
+				xQueueSend(Traffic_Queue_Handle, &set, 1000);
 			}
-			else
-			{
-				if( xQueueSend(xQueue_handle,&rx_data,1000))
-					{
-						printf("BlueTask GRP (%u).\n", rx_data); // Got wwrong Package
-						vTaskDelay(500);
-					}
-			}
+			calls++;
 		}
+		vTaskDelay(pdMS_TO_TICKS(1000));
 	}
 }
 
-
-/*-----------------------------------------------------------*/
-
-static void Green_LED_Controller_Task( void *pvParameters )
-{
-	uint16_t rx_data;
-	while(1)
-	{
-		if(xQueueReceive(xQueue_handle, &rx_data, 500))
-		{
-			if(rx_data == green)
-			{
-				vTaskDelay(250);
-				STM_EVAL_LEDOff(green_led);
-				printf("Green Off.\n");
-			}
-			else
-			{
-				if( xQueueSend(xQueue_handle,&rx_data,1000))
-					{
-						printf("GreenTask GRP (%u).\n", rx_data); // Got wrong Package
-						vTaskDelay(500);
-					}
-			}
-		}
+static void Light_State_Task(void *pvParameters) {
+	while(1) {
+		printf("Light State Task!\n");
+		vTaskDelay(1000);
 	}
 }
 
-/*-----------------------------------------------------------*/
+static void Display_Task(void *pvParameters) {
+	uint32_t traffic = 0;
+	while(1) {
+		printf("Display Task!\n");
+		uint8_t traffic_light;
+		if (xQueueReceive(Traffic_Queue_Handle, &traffic_light, 1000)) {
 
-static void Red_LED_Controller_Task( void *pvParameters )
-{
-	uint16_t rx_data;
-	while(1)
-	{
-		if(xQueueReceive(xQueue_handle, &rx_data, 500))
-		{
-			if(rx_data == red)
-			{
-				vTaskDelay(250);
-				STM_EVAL_LEDOff(red_led);
-				printf("Red off.\n");
-			}
-			else
-			{
-				if( xQueueSend(xQueue_handle,&rx_data,1000))
-					{
-						printf("RedTask GRP (%u).\n", rx_data); // Got wrong Package
-						vTaskDelay(500);
-					}
-			}
 		}
+		vTaskDelay(1000);
 	}
 }
-
-
-/*-----------------------------------------------------------*/
-
-static void Amber_LED_Controller_Task( void *pvParameters )
-{
-	uint16_t rx_data;
-	while(1)
-	{
-		if(xQueueReceive(xQueue_handle, &rx_data, 500))
-		{
-			if(rx_data == amber)
-			{
-				vTaskDelay(250);
-				STM_EVAL_LEDOff(amber_led);
-				printf("Amber Off.\n");
-			}
-			else
-			{
-				if( xQueueSend(xQueue_handle,&rx_data,1000))
-					{
-						printf("AmberTask GRP (%u).\n", rx_data); // Got wrong Package
-						vTaskDelay(500);
-					}
-			}
-		}
-	}
-}
-
 
 /*-----------------------------------------------------------*/
 
@@ -368,7 +292,7 @@ static void prvSetupHardware( void )
 {
 	/* Ensure all priority bits are assigned as preemption priority bits.
 	http://www.freertos.org/RTOS-Cortex-M3-M4.html */
-	NVIC_SetPriorityGrouping( 0 );
+
 
 	/* TODO: Setup the clocks, etc. here, if they were not configured before
 	main() was called. */
