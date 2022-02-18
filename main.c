@@ -47,16 +47,6 @@ static void Light_State_Task(void *pvParameters);
 #define Display_Task_Priority 1
 static void Display_Task(void *pvParameters);
 
-/*
- * The queue send and receive tasks as described in the comments at the top of
- * this file.
- */
-void Manager_Task( void *pvParameters );
-void Blue_LED_Controller_Task( void *pvParameters );
-void Green_LED_Controller_Task( void *pvParameters );
-void Red_LED_Controller_Task( void *pvParameters );
-void Amber_LED_Controller_Task( void *pvParameters );
-
 // Queues
 xQueueHandle ADC_Queue_Handle = 0;
 xQueueHandle Traffic_Queue_Handle = 0;
