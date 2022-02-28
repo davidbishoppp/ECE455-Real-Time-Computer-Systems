@@ -52,9 +52,6 @@ xQueueHandle flowToTrafficQueueHandle = 0;
 xQueueHandle trafficToDisplayQueueHandle = 0;
 xQueueHandle lightToDisplayQueueHandle = 0;
 
-xQueueHandle flowToLightQueueHandle = 0;
-xQueueHandle lightToDisplayQueueHandle = 0;
-
 // Timers
 TimerHandle_t Display_Timer = 0;
 
@@ -319,13 +316,12 @@ static void Display_Task(void *pvParameters) {
 	enum light_color light_status = red;
 	TickType_t last_wake_time = xTaskGetTickCount();
 	int traffic = 0;
-	uint16_t addCar = 0;
+	uint16_t addCar = 1;
 	while(1) {
 		//printf("Display Task!\n");
 		xQueueReceive(lightToDisplayQueueHandle, &light_status, 0); // get new light status if there is one
 		set_light(light_status);
 
-		addCar = 0;
 		xQueueReceive(trafficToDisplayQueueHandle, &addCar, 0);
 
 		//printf("Display adding car? %c\n", (addCar != 0) ? 'Y' : 'N');
@@ -344,6 +340,7 @@ static void Display_Task(void *pvParameters) {
 		}
 		if (addCar) {
 			traffic |= (1 << MAX_NUM_CARS);
+			addCar = 0;
 		}
 		move_traffic(traffic); // Set traffic LEDs
 		vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(DISPLAY_POLL_PERIOD_MS));
