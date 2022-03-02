@@ -29,6 +29,9 @@ enum light_color {
 	red = GPIO_Pin_0
 };
 
+int elapsed_tick_count = 0;
+enum light_color light_status = red;
+
 #define Data	GPIO_Pin_6
 #define Clock	GPIO_Pin_7
 #define Reset	GPIO_Pin_8
@@ -42,6 +45,7 @@ static void Generator_Task(void *pvParameters);
 
 #define Light_State_Task_Priority 1
 static void Light_State_Task(void *pvParameters);
+static void Light_State_Timer_Callback(TimerHandle_t xTimer);
 
 #define Display_Task_Priority 2
 static void Display_Task(void *pvParameters);
@@ -53,7 +57,7 @@ xQueueHandle trafficToDisplayQueueHandle = 0;
 xQueueHandle lightToDisplayQueueHandle = 0;
 
 // Timers
-TimerHandle_t Display_Timer = 0;
+TimerHandle_t Lights_Timer = 0;
 
 void GPIO_Setup() {
 	NVIC_SetPriorityGrouping(0);
@@ -221,11 +225,13 @@ int main(void) {
 	vQueueAddToRegistry(lightToDisplayQueueHandle, "LightsToDisplayQueue");
 
 	xTaskCreate( Flow_Adjustment_Task, "FlowAdjustment", configMINIMAL_STACK_SIZE, NULL, Flow_Adjustment_Task_Priority, NULL);
-//	xTaskCreate( Generator_Task, "Generator", configMINIMAL_STACK_SIZE, NULL, Generator_Task_Priority, NULL);
-	xTaskCreate( Light_State_Task, "LightState", configMINIMAL_STACK_SIZE, NULL, Light_State_Task_Priority, NULL);
+	xTaskCreate( Generator_Task, "Generator", configMINIMAL_STACK_SIZE, NULL, Generator_Task_Priority, NULL);
+	//xTaskCreate( Light_State_Task, "LightState", configMINIMAL_STACK_SIZE, NULL, Light_State_Task_Priority, NULL);
 	xTaskCreate( Display_Task, "Display", configMINIMAL_STACK_SIZE, NULL, Display_Task_Priority, NULL);
+	Lights_Timer = xTimerCreate("LightsStateTimer", pdMS_TO_TICKS(LIGHTS_POLL_PERIOD_MS), pdTRUE, 0, Light_State_Timer_Callback);
 
 	// Start the tasks and timer running.
+	xTimerStart(Lights_Timer, 0);
 	vTaskStartScheduler();
 
 	return 0;
@@ -310,6 +316,39 @@ static void Light_State_Task(void *pvParameters) {
 		vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(LIGHTS_POLL_PERIOD_MS));
 		elapsed_tick_count++;
 	}
+}
+
+
+static void Light_State_Timer_Callback(TimerHandle_t xTimer) {
+	uint16_t flow_val = 0;
+	int elapsed_duration_ms = 0;
+	int total_duration_ms = 0;
+
+	elapsed_duration_ms = elapsed_tick_count * LIGHTS_POLL_PERIOD_MS;
+
+	if (xQueueReceive(flowToLightQueueHandle, &flow_val, 200)) {
+		if (light_status == red) {
+			total_duration_ms = 5000 - 20 * flow_val;
+			if (elapsed_duration_ms >= total_duration_ms) {
+				elapsed_tick_count = 0;
+				light_status = green;
+			}
+		} else if (light_status == green) {
+			total_duration_ms = 2500 + 35 * flow_val;
+			if (elapsed_duration_ms >= total_duration_ms) {
+				elapsed_tick_count = 0;
+				light_status = yellow;
+			}
+		} else if (light_status == yellow) {
+			if (elapsed_duration_ms >= YELLOW_LIGHT_DURATION_MS) {
+				elapsed_tick_count = 0;
+				light_status = red;
+			}
+		}
+	}
+
+	xQueueOverwrite(lightToDisplayQueueHandle, &light_status);
+	elapsed_tick_count++;
 }
 
 static void Display_Task(void *pvParameters) {
