@@ -114,6 +114,9 @@ uint16_t Get_ADC_Percent() {
 	return (ADC_GetConversionValue(ADC1) * 6) >> 13; // shift 13 == divide by 4096
 }
 
+/**
+ * Gets the ADC Reading in percentage of 0-100
+ */
 uint16_t Get_ADC_Reading() {
 	ADC_SoftwareStartConv(ADC1);
 	while (!ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC));
@@ -156,56 +159,21 @@ void move_traffic(int traffic) {
 	}
 }
 
+/**
+ * Resets all the traffic
+ */
 void reset_traffic() {
 	GPIO_ResetBits(GPIOC, Reset);
 	GPIO_SetBits(GPIOC, Reset);
 }
 
 /**
- * TODO: is enum of for this????
+ * Sets the light GPIO pins
  */
 void set_light(enum light_color light_status) {
 	GPIO_ResetBits(GPIOC, green | yellow | red);
 	GPIO_SetBits(GPIOC, light_status);
 }
-
-/*--------------------------TESTING--------------------------*/
-
-void LED_on() {
-	GPIO_SetBits(GPIOC, GPIO_Pin_0);
-	GPIO_SetBits(GPIOC, GPIO_Pin_1);
-	GPIO_SetBits(GPIOC, GPIO_Pin_2);
-}
-
-void LED_off() {
-	GPIO_ResetBits(GPIOC, GPIO_Pin_0);
-	GPIO_ResetBits(GPIOC, GPIO_Pin_1);
-	GPIO_ResetBits(GPIOC, GPIO_Pin_2);
-}
-
-void test() {
-	int traffic = 0b1010101010101;
-	move_traffic(traffic);
-	return;
-
-	int i = 0;
-	bool addCar = false;
-	while (1) {
-		//LED_on();
-		printf("value: %i\n", Get_ADC_Percent());
-		//LED_off();
-		continue;
-		move_traffic(addCar);
-		addCar = !addCar;
-		i++;
-		if (i >= 12) {
-			reset_traffic();
-			i = 0;
-		}
-	}
-}
-
-/*-----------------------------------------------------------*/
 
 int main(void) {
 
@@ -224,9 +192,9 @@ int main(void) {
 	vQueueAddToRegistry(trafficToDisplayQueueHandle, "TrafficToDisplayQueue");
 	vQueueAddToRegistry(lightToDisplayQueueHandle, "LightsToDisplayQueue");
 
+	// Create tasks
 	xTaskCreate( Flow_Adjustment_Task, "FlowAdjustment", configMINIMAL_STACK_SIZE, NULL, Flow_Adjustment_Task_Priority, NULL);
 	xTaskCreate( Generator_Task, "Generator", configMINIMAL_STACK_SIZE, NULL, Generator_Task_Priority, NULL);
-	//xTaskCreate( Light_State_Task, "LightState", configMINIMAL_STACK_SIZE, NULL, Light_State_Task_Priority, NULL);
 	xTaskCreate( Display_Task, "Display", configMINIMAL_STACK_SIZE, NULL, Display_Task_Priority, NULL);
 	Lights_Timer = xTimerCreate("LightsStateTimer", pdMS_TO_TICKS(LIGHTS_POLL_PERIOD_MS), pdTRUE, 0, Light_State_Timer_Callback);
 
@@ -239,10 +207,9 @@ int main(void) {
 
 static void Flow_Adjustment_Task(void *pvParameters) {
 	TickType_t last_wake_time = xTaskGetTickCount();
-	//printf("Flow Adjustment Task!\n");
 	while(1) {
+		// Read adc and put value in queue for light state and traffic
 		uint16_t adc_reading = Get_ADC_Reading();
-		//printf("ADC Reading: %i\n", adc_reading);
 		xQueueOverwrite(flowToLightQueueHandle, &adc_reading);
 		xQueueOverwrite(flowToTrafficQueueHandle, &adc_reading);
 		vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(FLOW_POLL_PERIOD_MS));
@@ -258,7 +225,6 @@ static void Generator_Task(void *pvParameters) {
 	int time_till_next_car_ms = 0;
 
 	while(1) {
-
 		set = 0;
 		elapsed_duration_ms = elapsed_tick_count * TRAFFIC_POLL_PERIOD_MS;
 
@@ -268,9 +234,6 @@ static void Generator_Task(void *pvParameters) {
 				elapsed_tick_count = 0;
 				set = 1;
 			}
-			//printf("Elapsed duration (ms) : %i\n", elapsed_duration_ms);
-			//printf("Time till next car (ms): %i\n", time_till_next_car_ms);
-			//printf("Time to add new car? %c\n", (set == 1) ? 'Y' : 'N');
 		}
 
 		xQueueOverwrite(trafficToDisplayQueueHandle, &set);
@@ -278,46 +241,6 @@ static void Generator_Task(void *pvParameters) {
 		elapsed_tick_count++;
 	}
 }
-
-static void Light_State_Task(void *pvParameters) {
-	enum light_color light_status = red;
-	uint16_t flow_val = 0;
-	TickType_t last_wake_time = xTaskGetTickCount();
-	int elapsed_tick_count = 0;
-	int elapsed_duration_ms = 0;
-	int total_duration_ms = 0;
-
-	while(1) {
-
-		elapsed_duration_ms = elapsed_tick_count * LIGHTS_POLL_PERIOD_MS;
-
-		if (xQueueReceive(flowToLightQueueHandle, &flow_val, 200)) {
-			if (light_status == red) {
-				total_duration_ms = 5000 - 20 * flow_val;
-				if (elapsed_duration_ms >= total_duration_ms) {
-					elapsed_tick_count = 0;
-					light_status = green;
-				}
-			} else if (light_status == green) {
-				total_duration_ms = 2500 + 35 * flow_val;
-				if (elapsed_duration_ms >= total_duration_ms) {
-					elapsed_tick_count = 0;
-					light_status = yellow;
-				}
-			} else if (light_status == yellow) {
-				if (elapsed_duration_ms >= YELLOW_LIGHT_DURATION_MS) {
-					elapsed_tick_count = 0;
-					light_status = red;
-				}
-			}
-		}
-
-		xQueueOverwrite(lightToDisplayQueueHandle, &light_status);
-		vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(LIGHTS_POLL_PERIOD_MS));
-		elapsed_tick_count++;
-	}
-}
-
 
 static void Light_State_Timer_Callback(TimerHandle_t xTimer) {
 	uint16_t flow_val = 0;
@@ -327,20 +250,21 @@ static void Light_State_Timer_Callback(TimerHandle_t xTimer) {
 	elapsed_duration_ms = elapsed_tick_count * LIGHTS_POLL_PERIOD_MS;
 
 	if (xQueueReceive(flowToLightQueueHandle, &flow_val, 200)) {
+		// Set light status and calculate duration based on specs.
 		if (light_status == red) {
-			total_duration_ms = 5000 - 20 * flow_val;
+			total_duration_ms = 5000 - 20 * flow_val; // inverse to flow
 			if (elapsed_duration_ms >= total_duration_ms) {
 				elapsed_tick_count = 0;
 				light_status = green;
 			}
 		} else if (light_status == green) {
-			total_duration_ms = 2500 + 35 * flow_val;
+			total_duration_ms = 2500 + 35 * flow_val; // increase with flow
 			if (elapsed_duration_ms >= total_duration_ms) {
 				elapsed_tick_count = 0;
 				light_status = yellow;
 			}
 		} else if (light_status == yellow) {
-			if (elapsed_duration_ms >= YELLOW_LIGHT_DURATION_MS) {
+			if (elapsed_duration_ms >= YELLOW_LIGHT_DURATION_MS) { // constant
 				elapsed_tick_count = 0;
 				light_status = red;
 			}
@@ -357,19 +281,16 @@ static void Display_Task(void *pvParameters) {
 	int traffic = 0;
 	uint16_t addCar = 1;
 	while(1) {
-		//printf("Display Task!\n");
 		xQueueReceive(lightToDisplayQueueHandle, &light_status, 0); // get new light status if there is one
 		set_light(light_status);
 
 		xQueueReceive(trafficToDisplayQueueHandle, &addCar, 0);
 
-		//printf("Display adding car? %c\n", (addCar != 0) ? 'Y' : 'N');
-
 		traffic >>= 1; // Move all traffic by 1
 		if (light_status != green) { // If the light isn't green we move the car that pasted the line back to the next available spot
-			if (traffic & 0x400) {
-				traffic = traffic & ~0x400;
-				for (int i = 11; i < MAX_NUM_CARS; i++) {
+			if (traffic & 0x400) { // traffic line bit
+				traffic = traffic & ~0x400; // remove traffic that passed
+				for (int i = 11; i < MAX_NUM_CARS; i++) { // find next available spot
 					if ( !(traffic & (1 << i)) ) {
 						traffic |= (1 << i);
 						break;
@@ -381,6 +302,7 @@ static void Display_Task(void *pvParameters) {
 			traffic |= (1 << MAX_NUM_CARS);
 			addCar = 0;
 		}
+		
 		move_traffic(traffic); // Set traffic LEDs
 		vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(DISPLAY_POLL_PERIOD_MS));
 	}
