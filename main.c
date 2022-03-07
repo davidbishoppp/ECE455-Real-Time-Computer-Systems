@@ -149,50 +149,10 @@ void reset_traffic() {
 	GPIO_SetBits(GPIOC, Reset);
 }
 
-/**
- * TODO: is enum of for this????
- */
 void set_light(enum light_color light_status) {
 	GPIO_ResetBits(GPIOC, green | yellow | red);
 	GPIO_SetBits(GPIOC, light_status);
 }
-
-/*--------------------------TESTING--------------------------*/
-
-void LED_on() {
-	GPIO_SetBits(GPIOC, GPIO_Pin_0);
-	GPIO_SetBits(GPIOC, GPIO_Pin_1);
-	GPIO_SetBits(GPIOC, GPIO_Pin_2);
-}
-
-void LED_off() {
-	GPIO_ResetBits(GPIOC, GPIO_Pin_0);
-	GPIO_ResetBits(GPIOC, GPIO_Pin_1);
-	GPIO_ResetBits(GPIOC, GPIO_Pin_2);
-}
-
-void test() {
-	int traffic = 0b1010101010101;
-	move_traffic(traffic);
-	return;
-
-	int i = 0;
-	bool addCar = false;
-	while (1) {
-		//LED_on();
-		printf("value: %i\n", Get_ADC_Percent());
-		//LED_off();
-		continue;
-		move_traffic(addCar);
-		addCar = !addCar;
-		i++;
-		if (i >= 12) {
-			reset_traffic();
-			i = 0;
-		}
-	}
-}
-/*-----------------------------------------------------------*/
 
 int main(void) {
 
@@ -209,6 +169,7 @@ int main(void) {
 	vQueueAddToRegistry(Traffic_Queue_Handle, "TrafficQueue");
 	vQueueAddToRegistry(Light_Queue_Handle, "LightQueue");
 
+	// Create Tasks
 	xTaskCreate( Flow_Adjustment_Task, "FlowAdjustment", configMINIMAL_STACK_SIZE, NULL, Flow_Adjustment_Task_Priority, NULL);
 	xTaskCreate( Generator_Task, "Generator", configMINIMAL_STACK_SIZE, NULL, Generator_Task_Priority, NULL);
 	xTaskCreate( Light_State_Task, "LightState", configMINIMAL_STACK_SIZE, NULL, Light_State_Task_Priority, NULL);
