@@ -13,11 +13,15 @@
 #include "../FreeRTOS_Source/include/timers.h"
 
 /*-----------------------------------------------------------*/
-#define QUEUE_LENGTH 100
 
 #define MAX_NUM_CARS 19
 
-#define REFRESH_TIME_MS 1000
+#define FLOW_POLL_PERIOD_MS 100
+#define LIGHTS_POLL_PERIOD_MS 250
+#define TRAFFIC_POLL_PERIOD_MS 1000
+#define DISPLAY_POLL_PERIOD_MS 1000
+
+#define YELLOW_LIGHT_DURATION_MS 1000
 
 enum light_color {
 	green = GPIO_Pin_2,
@@ -25,17 +29,15 @@ enum light_color {
 	red = GPIO_Pin_0
 };
 
-#define amber_led	LED3
-#define green_led	LED4
-#define red_led		LED5
-#define blue_led	LED6
+int elapsed_tick_count = 0;
+enum light_color light_status = red;
 
 #define Data	GPIO_Pin_6
 #define Clock	GPIO_Pin_7
 #define Reset	GPIO_Pin_8
 
 // Prototypes
-#define Flow_Adjustment_Task_Priority 1
+#define Flow_Adjustment_Task_Priority 0
 static void Flow_Adjustment_Task(void *pvParameters);
 
 #define Generator_Task_Priority 1
@@ -43,17 +45,19 @@ static void Generator_Task(void *pvParameters);
 
 #define Light_State_Task_Priority 1
 static void Light_State_Task(void *pvParameters);
+static void Light_State_Timer_Callback(TimerHandle_t xTimer);
 
-#define Display_Task_Priority 1
+#define Display_Task_Priority 2
 static void Display_Task(void *pvParameters);
 
 // Queues
-xQueueHandle ADC_Queue_Handle = 0;
-xQueueHandle Traffic_Queue_Handle = 0;
-xQueueHandle Light_Queue_Handle = 0;
+xQueueHandle flowToLightQueueHandle = 0;
+xQueueHandle flowToTrafficQueueHandle = 0;
+xQueueHandle trafficToDisplayQueueHandle = 0;
+xQueueHandle lightToDisplayQueueHandle = 0;
 
 // Timers
-TimerHandle_t Display_Timer = 0;
+TimerHandle_t Lights_Timer = 0;
 
 void GPIO_Setup() {
 	NVIC_SetPriorityGrouping(0);
@@ -102,12 +106,14 @@ void ADC_Setup() {
 }
 
 /**
- * Gets ADC value in a percentage of 1-6
+ * Gets the ADC Reading in percentage of 0-100
  */
-uint16_t Get_ADC_Percent() {
+uint16_t Get_ADC_Reading() {
 	ADC_SoftwareStartConv(ADC1);
 	while (!ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC));
-	return (ADC_GetConversionValue(ADC1) * 6) >> 13; // shift 13 == divide by 4096
+	uint16_t adc_val = ADC_GetConversionValue(ADC1);
+	adc_val = (adc_val + 2 - 52) / 39;
+	return (adc_val > 100) ? 100 : adc_val;
 }
 
 /**
@@ -144,11 +150,17 @@ void move_traffic(int traffic) {
 	}
 }
 
+/**
+ * Resets all the traffic
+ */
 void reset_traffic() {
 	GPIO_ResetBits(GPIOC, Reset);
 	GPIO_SetBits(GPIOC, Reset);
 }
 
+/**
+ * Sets the light GPIO pins
+ */
 void set_light(enum light_color light_status) {
 	GPIO_ResetBits(GPIOC, green | yellow | red);
 	GPIO_SetBits(GPIOC, light_status);
@@ -159,101 +171,117 @@ int main(void) {
 	GPIO_Setup();
 	ADC_Setup();
 
-	// Create Queues for ADC and Traffic values, declared as global variables above.
-	ADC_Queue_Handle = xQueueCreate(QUEUE_LENGTH, sizeof( uint16_t ));
-	Traffic_Queue_Handle = xQueueCreate(QUEUE_LENGTH, sizeof(uint32_t));
-	Light_Queue_Handle = xQueueCreate(QUEUE_LENGTH, sizeof(enum light_color));
+	// Create Queues inter-task communication, declared as global variables above.
+	flowToTrafficQueueHandle = xQueueCreate(1, sizeof( uint16_t ));
+	flowToLightQueueHandle = xQueueCreate(1, sizeof(uint16_t));
+	trafficToDisplayQueueHandle = xQueueCreate(1, sizeof(uint16_t));
+	lightToDisplayQueueHandle = xQueueCreate(1, sizeof(enum light_color));
 
 	// Add queues to the registry
-	vQueueAddToRegistry(ADC_Queue_Handle, "ADCQueue");
-	vQueueAddToRegistry(Traffic_Queue_Handle, "TrafficQueue");
-	vQueueAddToRegistry(Light_Queue_Handle, "LightQueue");
+	vQueueAddToRegistry(flowToTrafficQueueHandle, "FlowToTrafficQueue");
+	vQueueAddToRegistry(flowToLightQueueHandle, "FlowToLightsQueue");
+	vQueueAddToRegistry(trafficToDisplayQueueHandle, "TrafficToDisplayQueue");
+	vQueueAddToRegistry(lightToDisplayQueueHandle, "LightsToDisplayQueue");
 
-	// Create Tasks
+	// Create tasks
 	xTaskCreate( Flow_Adjustment_Task, "FlowAdjustment", configMINIMAL_STACK_SIZE, NULL, Flow_Adjustment_Task_Priority, NULL);
 	xTaskCreate( Generator_Task, "Generator", configMINIMAL_STACK_SIZE, NULL, Generator_Task_Priority, NULL);
-	xTaskCreate( Light_State_Task, "LightState", configMINIMAL_STACK_SIZE, NULL, Light_State_Task_Priority, NULL);
 	xTaskCreate( Display_Task, "Display", configMINIMAL_STACK_SIZE, NULL, Display_Task_Priority, NULL);
+	Lights_Timer = xTimerCreate("LightsStateTimer", pdMS_TO_TICKS(LIGHTS_POLL_PERIOD_MS), pdTRUE, 0, Light_State_Timer_Callback);
 
-	/* Start the tasks and timer running. */
+	// Start the tasks and timer running.
+	xTimerStart(Lights_Timer, 0);
 	vTaskStartScheduler();
 
 	return 0;
 }
 
-/**
- * TODO: make event group to that flow has been put on a queue, place flow on queue if flag for traffic generator and/or light system are off
- */
 static void Flow_Adjustment_Task(void *pvParameters) {
-	printf("Flow Adjustment Task!\n");
+	TickType_t last_wake_time = xTaskGetTickCount();
 	while(1) {
-		uint16_t pot_value = Get_ADC_Percent();
-		xQueueSend(ADC_Queue_Handle, &pot_value, 1000);
-		xQueueSend(ADC_Queue_Handle, &pot_value, 1000);
-		vTaskDelay(pdMS_TO_TICKS(REFRESH_TIME_MS));
+		// Read adc and put value in queue for light state and traffic
+		uint16_t adc_reading = Get_ADC_Reading();
+		xQueueOverwrite(flowToLightQueueHandle, &adc_reading);
+		xQueueOverwrite(flowToTrafficQueueHandle, &adc_reading);
+		vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(FLOW_POLL_PERIOD_MS));
 	}
 }
 
-/**
- * TODO: if flow event flag is not set dont need to check queue
- * make a event group for display t read if generator data is on queue
- */
 static void Generator_Task(void *pvParameters) {
-	int calls = 0;
+	uint16_t set = 0;
+	uint16_t flow_val = 0;
+	TickType_t last_wake_time = xTaskGetTickCount();
+	int elapsed_tick_count = 0;
+	int elapsed_duration_ms = 0;
+	int time_till_next_car_ms = 0;
+
 	while(1) {
-		printf("Generator Task!\n");
-		// Get ADC percentage
-		uint16_t pot_value;
-		if (xQueueReceive(ADC_Queue_Handle, &pot_value, 200)) {
-			// TODO make actual probability
-			if (calls >= pot_value) {
-				calls = 0;
-				uint8_t set = 1;
-				xQueueSend(Traffic_Queue_Handle, &set, 500);
+		set = 0;
+		elapsed_duration_ms = elapsed_tick_count * TRAFFIC_POLL_PERIOD_MS;
+
+		if (xQueueReceive(flowToTrafficQueueHandle, &flow_val, 200)) {
+			time_till_next_car_ms = 6000 - 50 * flow_val;
+			if (elapsed_duration_ms >= time_till_next_car_ms) {
+				elapsed_tick_count = 0;
+				set = 1;
 			}
-			calls++;
 		}
-		vTaskDelay(pdMS_TO_TICKS(REFRESH_TIME_MS));
+
+		xQueueOverwrite(trafficToDisplayQueueHandle, &set);
+		vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(TRAFFIC_POLL_PERIOD_MS));
+		elapsed_tick_count++;
 	}
 }
 
-/**
- * TODO: read event group to see if flow data is on queue for light state
- * change light timer time depending on flow data
- */
-static void Light_State_Task(void *pvParameters) {
-	enum light_color light_status = green;
-	while(1) {
-		printf("Light State Task!\n");
-		if (light_status == green) {
-			light_status = red;
-		} else {
-			light_status = green;
+static void Light_State_Timer_Callback(TimerHandle_t xTimer) {
+	uint16_t flow_val = 0;
+	int elapsed_duration_ms = 0;
+	int total_duration_ms = 0;
+
+	elapsed_duration_ms = elapsed_tick_count * LIGHTS_POLL_PERIOD_MS;
+
+	if (xQueueReceive(flowToLightQueueHandle, &flow_val, 200)) {
+		// Set light status and calculate duration based on specs.
+		if (light_status == red) {
+			total_duration_ms = 5000 - 20 * flow_val; // inverse to flow
+			if (elapsed_duration_ms >= total_duration_ms) {
+				elapsed_tick_count = 0;
+				light_status = green;
+			}
+		} else if (light_status == green) {
+			total_duration_ms = 2500 + 35 * flow_val; // increase with flow
+			if (elapsed_duration_ms >= total_duration_ms) {
+				elapsed_tick_count = 0;
+				light_status = yellow;
+			}
+		} else if (light_status == yellow) {
+			if (elapsed_duration_ms >= YELLOW_LIGHT_DURATION_MS) { // constant
+				elapsed_tick_count = 0;
+				light_status = red;
+			}
 		}
-		xQueueSend(Light_Queue_Handle, &light_status, 500);
-		vTaskDelay(pdMS_TO_TICKS(REFRESH_TIME_MS*4));
 	}
+
+	xQueueOverwrite(lightToDisplayQueueHandle, &light_status);
+	elapsed_tick_count++;
 }
 
-/**
- * TODO: watch event group and add new traffic or change light if even flags are set.
- */
 static void Display_Task(void *pvParameters) {
 	enum light_color light_status = red;
+	TickType_t last_wake_time = xTaskGetTickCount();
 	int traffic = 0;
+	uint16_t addCar = 1;
 	while(1) {
-		printf("Display Task!\n");
-		xQueueReceive(Light_Queue_Handle, &light_status, 200); // get new light status if there is one
+		xQueueReceive(lightToDisplayQueueHandle, &light_status, 0); // get new light status if there is one
 		set_light(light_status);
 
-		int addCar = 0;
-		xQueueReceive(Traffic_Queue_Handle, &addCar, 200);
+		xQueueReceive(trafficToDisplayQueueHandle, &addCar, 0);
 
 		traffic >>= 1; // Move all traffic by 1
 		if (light_status != green) { // If the light isn't green we move the car that pasted the line back to the next available spot
-			if (traffic & 0x400) {
-				traffic = traffic & ~0x400;
-				for (int i = 11; i < MAX_NUM_CARS; i++) {
+			if (traffic & 0x400) { // traffic line bit
+				traffic = traffic & ~0x400; // remove traffic that passed
+				for (int i = 11; i < MAX_NUM_CARS; i++) { // find next available spot
 					if ( !(traffic & (1 << i)) ) {
 						traffic |= (1 << i);
 						break;
@@ -263,9 +291,11 @@ static void Display_Task(void *pvParameters) {
 		}
 		if (addCar) {
 			traffic |= (1 << MAX_NUM_CARS);
+			addCar = 0;
 		}
+		
 		move_traffic(traffic); // Set traffic LEDs
-		vTaskDelay(pdMS_TO_TICKS(REFRESH_TIME_MS));
+		vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(DISPLAY_POLL_PERIOD_MS));
 	}
 }
 
