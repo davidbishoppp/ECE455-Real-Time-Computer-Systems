@@ -16,10 +16,10 @@
 
 /*-----------------------------------------------------------*/
 
-#define DEBUG 0
+#define DEBUG 1
 
-//#define TEST_BENCH_1 1
-#define TEST_BENCH_2 1
+#define TEST_BENCH_1 1
+//#define TEST_BENCH_2 1
 //#define TEST_BENCH_3 1
 
 // Test Bench Defines
@@ -59,17 +59,18 @@
 	#define TASK3_EXECUTION_MS 200
 	#define TASK3_PERIOD_MS 500
 
-	#define HYPER_PERIOD_MS 1500
+	#define HYPER_PERIOD_MS 500
 #endif
 
 // Tasks
 #define DD_SCHEDULER_PRIORITY 4
-#define MONITOR_TASK_PRIORITY 1
+#define MONITOR_TASK_PRIORITY 3
 #define MONITOR_TASK_PRIORITY_PRINTING 6
 #define DD_RUNNING_TASK_PRIORITY 2
 #define DD_WAIT_TASK_PRIORITY 0
 
 static void DD_Scheduler(void *pvParameters);
+static void Monitor_Task_CallBack(TimerHandle_t xTimer);
 static void DD_Task_Generator_Callback_1(TimerHandle_t xTimer);
 static void DD_Task_Generator_Callback_2(TimerHandle_t xTimer);
 static void DD_Task_Generator_Callback_3(TimerHandle_t xTimer);
@@ -141,7 +142,7 @@ void delete_dd_task(struct dd_task completed_task) {
 	uint8_t event = 1;
 	completed_task.completion_time = xTaskGetTickCount();
 	xQueueSend(delete_task_queue, &completed_task, 0);
-	xQueueSend(event_queue, &event, 0);
+	xQueueSend(event_queue, &event, 0); // Should this be overwrite?
 }
 
 struct dd_task_list* get_active_dd_task_list(void) {
@@ -149,7 +150,7 @@ struct dd_task_list* get_active_dd_task_list(void) {
 	uint8_t event = 1;
 	xQueueOverwrite(request_active_task_queue, &event);
 	xQueueOverwrite(event_queue, &event);
-	xQueueReceive(get_active_task_queue, &active_list, 0);
+	xQueueReceive(get_active_task_queue, &active_list, portMAX_DELAY); // Should we not block here indefinitely?
 	return active_list;
 }
 
@@ -158,7 +159,7 @@ struct dd_task_list* get_complete_dd_task_list(void) {
 	uint8_t event = 1;
 	xQueueOverwrite(request_complete_task_queue, &event);
 	xQueueOverwrite(event_queue, &event);
-	xQueueReceive(get_complete_task_queue, &complete_list, 0);
+	xQueueReceive(get_complete_task_queue, &complete_list, portMAX_DELAY); // Same as above
 	return complete_list;
 }
 
@@ -167,7 +168,7 @@ struct dd_task_list* get_overdue_dd_task_list(void) {
 	uint8_t event = 1;
 	xQueueOverwrite(request_overdue_task_queue, &event);
 	xQueueOverwrite(event_queue, &event);
-	xQueueReceive(get_overdue_task_queue, &overdue_list, 0);
+	xQueueReceive(get_overdue_task_queue, &overdue_list, portMAX_DELAY); // Same as above
 	return overdue_list;
 }
 
@@ -189,7 +190,6 @@ void insert_to_list(struct dd_task_list** root, struct dd_task_list* node) {
 		*root = node;
 		return;
 	}
-
 
 	struct dd_task_list* prev;
 	struct dd_task_list* cur = *root;
@@ -262,11 +262,11 @@ int main(void) {
 	Task_1_Generator_Timer = xTimerCreate("Task_1_Generator_Timer", pdMS_TO_TICKS(TASK1_PERIOD_MS), pdTRUE, 0, DD_Task_Generator_Callback_1);
 	Task_2_Generator_Timer = xTimerCreate("Task_2_Generator_Timer", pdMS_TO_TICKS(TASK2_PERIOD_MS), pdTRUE, 0, DD_Task_Generator_Callback_2);
 	Task_3_Generator_Timer = xTimerCreate("Task_3_Generator_Timer", pdMS_TO_TICKS(TASK3_PERIOD_MS), pdTRUE, 0, DD_Task_Generator_Callback_3);
-	Monitor_Task_Timer = xTimerCreate("Monitor_Task_Timer", pdMS_TO_TICKS(HYPER_PERIOD_MS), pdTRUE, 0, Monitor_Task_Time_Callback);
+	Monitor_Task_Timer = xTimerCreate("Monitor_Task_Timer", pdMS_TO_TICKS(HYPER_PERIOD_MS), pdTRUE, 0, Monitor_Task_CallBack);
 
 	// create F tasks ( scheduler (highest priority), monitor (second highest priority) )
 	xTaskCreate(DD_Scheduler, "DD_Scheduler", configMINIMAL_STACK_SIZE, NULL, DD_SCHEDULER_PRIORITY, NULL);
-	xTaskCreate(Monitor_Task, "Monitor_Task", configMINIMAL_STACK_SIZE, NULL, MONITOR_TASK_PRIORITY, NULL);
+	//xTaskCreate(Monitor_Task, "Monitor_Task", configMINIMAL_STACK_SIZE, NULL, MONITOR_TASK_PRIORITY, NULL);
 
 	// start timers
 	xTimerStart(Task_1_Generator_Timer, 0);
@@ -382,7 +382,64 @@ static void DD_Scheduler(void *pvParameters) {
 }
 
 static void Monitor_Task_CallBack(TimerHandle_t xTimer) {
-		
+	struct dd_task_list* active_list = NULL;
+	struct dd_task_list* completed_list = NULL;
+	struct dd_task_list* overdue_list = NULL;
+
+	// request active / complete / overdue lists TODO: need to use help functions for scheduler...
+	active_list = get_active_dd_task_list();
+	completed_list = get_complete_dd_task_list();
+	overdue_list = get_overdue_dd_task_list();
+
+//	vTaskPrioritySet(xTaskGetCurrentTaskHandle(), MONITOR_TASK_PRIORITY_PRINTING);
+
+//	char* buffer = (char *)pvPortMalloc(sizeof(char)*1024);
+	// print everything we have
+	printf("Tick Time: %i\n", (int)xTaskGetTickCount());
+	if (DEBUG) {
+		printf("active_list:\n");
+	}
+	int length = 0;
+	while (active_list != NULL) {
+		if (DEBUG) {
+			printf("\tname: %s, release: %i, deadline: %i\n",\
+					active_list->task.name, active_list->task.release_time, active_list->task.absolute_deadline);
+		}
+		active_list = active_list->next_task;
+		length++;
+	}
+	printf("active_list_length: %i\n", length);
+	length = 0;
+	if (DEBUG) {
+		printf("completed_list:\n");
+	}
+	while (completed_list != NULL) {
+		if (DEBUG) {
+			printf("\tname: %s, release: %i, completed: %i, deadline: %i\n",\
+					completed_list->task.name, completed_list->task.release_time, completed_list->task.completion_time, completed_list->task.absolute_deadline);
+		}
+		completed_list = completed_list->next_task;
+		length++;
+	}
+	printf("completed_list_length: %i\n", length);
+	length = 0;
+	if (DEBUG) {
+		printf("overdue_list:\n");
+	}
+	while (overdue_list != NULL) {
+		if (DEBUG) {
+			printf("\tname: %s,  release: %i, completed: %i, deadline: %i\n", \
+					overdue_list->task.name, overdue_list->task.release_time, overdue_list->task.completion_time, overdue_list->task.absolute_deadline);
+		}
+		overdue_list = overdue_list->next_task;
+		length++;
+	}
+	printf("overdue_list_length: %i\n\n\n", length);
+	active_list = NULL;
+	completed_list = NULL;
+	overdue_list = NULL;
+//	vPortFree(buffer);
+//	vTaskPrioritySet(xTaskGetCurrentTaskHandle(), MONITOR_TASK_PRIORITY);
 }
 
 /**
@@ -464,7 +521,8 @@ static void Monitor_Task(void *pvParameters) {
 	struct dd_task_list* completed_list = NULL;
 	struct dd_task_list* overdue_list = NULL;
 	while (1) {
-		if (last_print + pdMS_TO_TICKS(HYPER_PERIOD_MS) < xTaskGetTickCount()) {
+//		if (last_print + pdMS_TO_TICKS(HYPER_PERIOD_MS) < xTaskGetTickCount()) {
+			vTaskDelayUntil(&last_print, pdMS_TO_TICKS(HYPER_PERIOD_MS));
 			// request active / complete / overdue lists TODO: need to use help functions for scheduler...
 			active_list = get_active_dd_task_list();
 			completed_list = get_complete_dd_task_list();
@@ -513,14 +571,14 @@ static void Monitor_Task(void *pvParameters) {
 				overdue_list = overdue_list->next_task;
 				length++;
 			}
-			printf("overdue_list_length: %i\n", length);
+			printf("overdue_list_length: %i\n\n\n", length);
 			active_list = NULL;
 			completed_list = NULL;
 			overdue_list = NULL;
 			last_print = xTaskGetTickCount();
 			vPortFree(buffer);
 			vTaskPrioritySet(xTaskGetCurrentTaskHandle(), MONITOR_TASK_PRIORITY);
-		}
+//		}
 
 
 	}
