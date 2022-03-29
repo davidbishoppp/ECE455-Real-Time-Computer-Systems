@@ -99,6 +99,8 @@ TimerHandle_t Task_1_Generator_Timer;
 TimerHandle_t Task_2_Generator_Timer;
 TimerHandle_t Task_3_Generator_Timer;
 
+TimerHandle_t Monitor_Task_Timer;
+
 enum task_type {PERIODIC, APERIODIC};
 
 struct dd_task {
@@ -260,6 +262,7 @@ int main(void) {
 	Task_1_Generator_Timer = xTimerCreate("Task_1_Generator_Timer", pdMS_TO_TICKS(TASK1_PERIOD_MS), pdTRUE, 0, DD_Task_Generator_Callback_1);
 	Task_2_Generator_Timer = xTimerCreate("Task_2_Generator_Timer", pdMS_TO_TICKS(TASK2_PERIOD_MS), pdTRUE, 0, DD_Task_Generator_Callback_2);
 	Task_3_Generator_Timer = xTimerCreate("Task_3_Generator_Timer", pdMS_TO_TICKS(TASK3_PERIOD_MS), pdTRUE, 0, DD_Task_Generator_Callback_3);
+	Monitor_Task_Timer = xTimerCreate("Monitor_Task_Timer", pdMS_TO_TICKS(HYPER_PERIOD_MS), pdTRUE, 0, Monitor_Task_Time_Callback);
 
 	// create F tasks ( scheduler (highest priority), monitor (second highest priority) )
 	xTaskCreate(DD_Scheduler, "DD_Scheduler", configMINIMAL_STACK_SIZE, NULL, DD_SCHEDULER_PRIORITY, NULL);
@@ -269,6 +272,7 @@ int main(void) {
 	xTimerStart(Task_1_Generator_Timer, 0);
 	xTimerStart(Task_2_Generator_Timer, 0);
 	xTimerStart(Task_3_Generator_Timer, 0);
+	xTimerStart(Monitor_Task_Timer, pdMS_TO_TICKS(HYPER_PERIOD_MS));
 
 
 	// release tasks right away
@@ -375,6 +379,10 @@ static void DD_Scheduler(void *pvParameters) {
 			xQueueSend(get_overdue_task_queue, &overdue_task_list, 0);
 		}
 	}
+}
+
+static void Monitor_Task_CallBack(TimerHandle_t xTimer) {
+		
 }
 
 /**
