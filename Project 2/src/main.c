@@ -18,9 +18,9 @@
 
 #define DEBUG 1
 
-#define TEST_BENCH_1 1
+//#define TEST_BENCH_1 1
 //#define TEST_BENCH_2 1
-//#define TEST_BENCH_3 1
+#define TEST_BENCH_3 1
 
 // Test Bench Defines
 #ifdef TEST_BENCH_1
@@ -133,16 +133,16 @@ void create_dd_task(enum task_type type, uint32_t id, uint32_t iteration, char* 
 	new_task.completion_time = 0;
 
 	// send new task to queue and notify scheduler of event
-	xQueueSendFromISR(create_task_queue, &new_task, 4);
-	xQueueOverwriteFromISR(event_queue, 1, (BaseType_t*) 4);
+	int event = 1;
+	xQueueSendFromISR(create_task_queue, &new_task, NULL);
+	xQueueOverwriteFromISR(event_queue, &event, NULL);
 }
 
 void delete_dd_task(struct dd_task completed_task) {
-	// send task_id and task_iteration to queue
 	uint8_t event = 1;
 	completed_task.completion_time = xTaskGetTickCount();
 	xQueueSend(delete_task_queue, &completed_task, 0);
-	xQueueSend(event_queue, &event, 0); // Should this be overwrite?
+	xQueueOverwrite(event_queue, &event);
 }
 
 struct dd_task_list* get_active_dd_task_list(void) {
@@ -150,7 +150,7 @@ struct dd_task_list* get_active_dd_task_list(void) {
 	uint8_t event = 1;
 	xQueueOverwrite(request_active_task_queue, &event);
 	xQueueOverwrite(event_queue, &event);
-	xQueueReceive(get_active_task_queue, &active_list, portMAX_DELAY); // Should we not block here indefinitely?
+	xQueueReceive(get_active_task_queue, &active_list, 0);
 	return active_list;
 }
 
@@ -159,7 +159,7 @@ struct dd_task_list* get_complete_dd_task_list(void) {
 	uint8_t event = 1;
 	xQueueOverwrite(request_complete_task_queue, &event);
 	xQueueOverwrite(event_queue, &event);
-	xQueueReceive(get_complete_task_queue, &complete_list, portMAX_DELAY); // Same as above
+	xQueueReceive(get_complete_task_queue, &complete_list, 0);
 	return complete_list;
 }
 
@@ -168,7 +168,7 @@ struct dd_task_list* get_overdue_dd_task_list(void) {
 	uint8_t event = 1;
 	xQueueOverwrite(request_overdue_task_queue, &event);
 	xQueueOverwrite(event_queue, &event);
-	xQueueReceive(get_overdue_task_queue, &overdue_list, portMAX_DELAY); // Same as above
+	xQueueReceive(get_overdue_task_queue, &overdue_list, 0);
 	return overdue_list;
 }
 
@@ -386,14 +386,11 @@ static void Monitor_Task_CallBack(TimerHandle_t xTimer) {
 	struct dd_task_list* completed_list = NULL;
 	struct dd_task_list* overdue_list = NULL;
 
-	// request active / complete / overdue lists TODO: need to use help functions for scheduler...
+	// request active / complete / overdue lists
 	active_list = get_active_dd_task_list();
 	completed_list = get_complete_dd_task_list();
 	overdue_list = get_overdue_dd_task_list();
 
-//	vTaskPrioritySet(xTaskGetCurrentTaskHandle(), MONITOR_TASK_PRIORITY_PRINTING);
-
-//	char* buffer = (char *)pvPortMalloc(sizeof(char)*1024);
 	// print everything we have
 	printf("Tick Time: %i\n", (int)xTaskGetTickCount());
 	if (DEBUG) {
@@ -438,8 +435,6 @@ static void Monitor_Task_CallBack(TimerHandle_t xTimer) {
 	active_list = NULL;
 	completed_list = NULL;
 	overdue_list = NULL;
-//	vPortFree(buffer);
-//	vTaskPrioritySet(xTaskGetCurrentTaskHandle(), MONITOR_TASK_PRIORITY);
 }
 
 /**
@@ -510,77 +505,69 @@ static void DD_Task_3(void *pvParameters) {
 		vTaskSuspend(NULL); // block forever
 	}
 }
-/**
- * TODO:
- * - Monitor task never runs on test bench 3. Probably because there is no downtime between tasks. Maybe timer interupt for monitor task instead of task?
- * - No overdue tasks? set DEBUG to 1 for timings.
- */
+
 static void Monitor_Task(void *pvParameters) {
 	TickType_t last_print = xTaskGetTickCount();
 	struct dd_task_list* active_list = NULL;
 	struct dd_task_list* completed_list = NULL;
 	struct dd_task_list* overdue_list = NULL;
 	while (1) {
-//		if (last_print + pdMS_TO_TICKS(HYPER_PERIOD_MS) < xTaskGetTickCount()) {
-			vTaskDelayUntil(&last_print, pdMS_TO_TICKS(HYPER_PERIOD_MS));
-			// request active / complete / overdue lists TODO: need to use help functions for scheduler...
-			active_list = get_active_dd_task_list();
-			completed_list = get_complete_dd_task_list();
-			overdue_list = get_overdue_dd_task_list();
+		vTaskDelayUntil(&last_print, pdMS_TO_TICKS(HYPER_PERIOD_MS));
+		// request active / complete / overdue lists
+		active_list = get_active_dd_task_list();
+		completed_list = get_complete_dd_task_list();
+		overdue_list = get_overdue_dd_task_list();
 
-			vTaskPrioritySet(xTaskGetCurrentTaskHandle(), MONITOR_TASK_PRIORITY_PRINTING);
+		vTaskPrioritySet(xTaskGetCurrentTaskHandle(), MONITOR_TASK_PRIORITY_PRINTING);
 
-			char* buffer = (char *)pvPortMalloc(sizeof(char)*1024);
-			// print everything we have
-			printf("Tick Time: %i\n", (int)xTaskGetTickCount());
+		char* buffer = (char *)pvPortMalloc(sizeof(char)*1024);
+		// print everything we have
+		printf("Tick Time: %i\n", (int)xTaskGetTickCount());
+		if (DEBUG) {
+			printf("active_list:\n");
+		}
+		int length = 0;
+		while (active_list != NULL) {
 			if (DEBUG) {
-				printf("active_list:\n");
+				printf("\tname: %s, release: %i, deadline: %i\n",\
+						active_list->task.name, active_list->task.release_time, active_list->task.absolute_deadline);
 			}
-			int length = 0;
-			while (active_list != NULL) {
-				if (DEBUG) {
-					printf("\tname: %s, release: %i, deadline: %i\n",\
-							active_list->task.name, active_list->task.release_time, active_list->task.absolute_deadline);
-				}
-				active_list = active_list->next_task;
-				length++;
-			}
-			printf("active_list_length: %i\n", length);
-			length = 0;
+			active_list = active_list->next_task;
+			length++;
+		}
+		printf("active_list_length: %i\n", length);
+		length = 0;
+		if (DEBUG) {
+			printf("completed_list:\n");
+		}
+		while (completed_list != NULL) {
 			if (DEBUG) {
-				printf("completed_list:\n");
+				printf("\tname: %s, release: %i, completed: %i, deadline: %i\n",\
+						completed_list->task.name, completed_list->task.release_time, completed_list->task.completion_time, completed_list->task.absolute_deadline);
 			}
-			while (completed_list != NULL) {
-				if (DEBUG) {
-					printf("\tname: %s, release: %i, completed: %i, deadline: %i\n",\
-							completed_list->task.name, completed_list->task.release_time, completed_list->task.completion_time, completed_list->task.absolute_deadline);
-				}
-				completed_list = completed_list->next_task;
-				length++;
-			}
-			printf("completed_list_length: %i\n", length);
-			length = 0;
+			completed_list = completed_list->next_task;
+			length++;
+		}
+		printf("completed_list_length: %i\n", length);
+		length = 0;
+		if (DEBUG) {
+			printf("overdue_list:\n");
+		}
+		while (overdue_list != NULL) {
 			if (DEBUG) {
-				printf("overdue_list:\n");
+				printf("\tname: %s,  release: %i, completed: %i, deadline: %i\n", \
+						overdue_list->task.name, overdue_list->task.release_time, overdue_list->task.completion_time, overdue_list->task.absolute_deadline);
 			}
-			while (overdue_list != NULL) {
-				if (DEBUG) {
-					printf("\tname: %s,  release: %i, completed: %i, deadline: %i\n", \
-							overdue_list->task.name, overdue_list->task.release_time, overdue_list->task.completion_time, overdue_list->task.absolute_deadline);
-				}
-				overdue_list = overdue_list->next_task;
-				length++;
-			}
-			printf("overdue_list_length: %i\n\n\n", length);
-			active_list = NULL;
-			completed_list = NULL;
-			overdue_list = NULL;
-			last_print = xTaskGetTickCount();
-			vPortFree(buffer);
-			vTaskPrioritySet(xTaskGetCurrentTaskHandle(), MONITOR_TASK_PRIORITY);
-//		}
-
-
+			overdue_list = overdue_list->next_task;
+			length++;
+		}
+		printf("overdue_list_length: %i\n\n\n", length);
+		active_list = NULL;
+		completed_list = NULL;
+		overdue_list = NULL;
+		last_print = xTaskGetTickCount();
+		vPortFree(buffer);
+		vTaskPrioritySet(xTaskGetCurrentTaskHandle(), MONITOR_TASK_PRIORITY);
 	}
 }
 
