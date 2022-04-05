@@ -266,7 +266,6 @@ int main(void) {
 
 	// create F tasks ( scheduler (highest priority), monitor (second highest priority) )
 	xTaskCreate(DD_Scheduler, "DD_Scheduler", configMINIMAL_STACK_SIZE, NULL, DD_SCHEDULER_PRIORITY, NULL);
-	//xTaskCreate(Monitor_Task, "Monitor_Task", configMINIMAL_STACK_SIZE, NULL, MONITOR_TASK_PRIORITY, NULL);
 
 	// start timers
 	xTimerStart(Task_1_Generator_Timer, 0);
@@ -503,71 +502,6 @@ static void DD_Task_3(void *pvParameters) {
 		struct dd_task* task = (struct dd_task*) pvParameters;
 		delete_dd_task(*task);
 		vTaskSuspend(NULL); // block forever
-	}
-}
-
-static void Monitor_Task(void *pvParameters) {
-	TickType_t last_print = xTaskGetTickCount();
-	struct dd_task_list* active_list = NULL;
-	struct dd_task_list* completed_list = NULL;
-	struct dd_task_list* overdue_list = NULL;
-	while (1) {
-		vTaskDelayUntil(&last_print, pdMS_TO_TICKS(HYPER_PERIOD_MS));
-		// request active / complete / overdue lists
-		active_list = get_active_dd_task_list();
-		completed_list = get_complete_dd_task_list();
-		overdue_list = get_overdue_dd_task_list();
-
-		vTaskPrioritySet(xTaskGetCurrentTaskHandle(), MONITOR_TASK_PRIORITY_PRINTING);
-
-		char* buffer = (char *)pvPortMalloc(sizeof(char)*1024);
-		// print everything we have
-		printf("Tick Time: %i\n", (int)xTaskGetTickCount());
-		if (DEBUG) {
-			printf("active_list:\n");
-		}
-		int length = 0;
-		while (active_list != NULL) {
-			if (DEBUG) {
-				printf("\tname: %s, release: %i, deadline: %i\n",\
-						active_list->task.name, active_list->task.release_time, active_list->task.absolute_deadline);
-			}
-			active_list = active_list->next_task;
-			length++;
-		}
-		printf("active_list_length: %i\n", length);
-		length = 0;
-		if (DEBUG) {
-			printf("completed_list:\n");
-		}
-		while (completed_list != NULL) {
-			if (DEBUG) {
-				printf("\tname: %s, release: %i, completed: %i, deadline: %i\n",\
-						completed_list->task.name, completed_list->task.release_time, completed_list->task.completion_time, completed_list->task.absolute_deadline);
-			}
-			completed_list = completed_list->next_task;
-			length++;
-		}
-		printf("completed_list_length: %i\n", length);
-		length = 0;
-		if (DEBUG) {
-			printf("overdue_list:\n");
-		}
-		while (overdue_list != NULL) {
-			if (DEBUG) {
-				printf("\tname: %s,  release: %i, completed: %i, deadline: %i\n", \
-						overdue_list->task.name, overdue_list->task.release_time, overdue_list->task.completion_time, overdue_list->task.absolute_deadline);
-			}
-			overdue_list = overdue_list->next_task;
-			length++;
-		}
-		printf("overdue_list_length: %i\n\n\n", length);
-		active_list = NULL;
-		completed_list = NULL;
-		overdue_list = NULL;
-		last_print = xTaskGetTickCount();
-		vPortFree(buffer);
-		vTaskPrioritySet(xTaskGetCurrentTaskHandle(), MONITOR_TASK_PRIORITY);
 	}
 }
 
